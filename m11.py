@@ -4,10 +4,27 @@ import matplotlib.pyplot as plt
 from scipy.spatial import distance
 import pickle
 import pandas as pd
+from tqdm import tqdm
+import time
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决保存图像是负号'-'显示为方块的问题
+
+# 计算DNI法向直接辐射照度
+def calculate_DNI(alpha_s, H_a=3):
+    """
+    计算法向直接辐射照度
+    alpha_s: 太阳高度角(弧度)
+    H_a: 海拔高度(km), 默认3km
+    """
+    G0 = 1.366  # 太阳常数 kW/m²
+    a = 0.4237 - 0.00821 * (6 - H_a)**2
+    b = 0.5055 + 0.00595 * (6.5 - H_a)**2
+    c = 0.2711 + 0.01858 * (2.5 - H_a)**2
+    
+    DNI = G0 * (a + b * np.exp(-c / np.sin(alpha_s)))
+    return DNI
 
 # 读取定日镜坐标数据
 def read_data():
@@ -62,18 +79,18 @@ def point_in_triangle(px, py, pz, A, B, C):
     V13 = C - A
     V23 = C - B
     
-    # 计算叉积
-    cross1 = np.cross(V12, V1q)
-    cross2 = np.cross(V12, V13)
-    cross3 = np.cross(V23, V2q)
-    cross4 = np.cross(V23, -V12)
-    cross5 = np.cross(-V13, V3q)
-    cross6 = np.cross(-V13, -V23)
+    # 计算叉积和点积，符合Matlab逻辑
+    cross_AB_AP = np.cross(V12, V1q)
+    cross_AB_AC = np.cross(V12, V13)
+    cross_BC_BP = np.cross(V23, V2q)
+    cross_BC_BA = np.cross(V23, -V12)
+    cross_CA_CP = np.cross(-V13, V3q)
+    cross_CA_CB = np.cross(-V13, -V23)
     
-    # 判断是否同向
-    cond1 = np.dot(cross1, cross2) > 0
-    cond2 = np.dot(cross3, cross4) > 0
-    cond3 = np.dot(cross5, cross6) > 0
+    # 判断是否满足条件
+    cond1 = np.dot(cross_AB_AP, cross_AB_AC) > 0
+    cond2 = np.dot(cross_BC_BP, cross_BC_BA) > 0
+    cond3 = np.dot(cross_CA_CP, cross_CA_CB) > 0
     
     return cond1 and cond2 and cond3
 
@@ -87,6 +104,111 @@ def is_point_in_rectangular(px, py, pz, rectangular):
     # 分别判断点是否在两个三角形内部
     return (point_in_triangle(px, py, pz, A, B, C) or 
             point_in_triangle(px, py, pz, A, C, D))
+
+# 获取定日镜四个角点坐标
+def get_heliostat_corners(location, h):
+    corners = []
+    for loc in location:
+        x, y = loc
+        corners.append(np.array([[x - 3, y - 3, h],
+                                  [x + 3, y - 3, h],
+                                  [x + 3, y + 3, h],
+                                  [x - 3, y + 3, h]]))
+    return np.array(corners)
+
+# 计算各种效率指标
+def calculate_efficiencies(shade, ntrunc, s_in, s_reflect, location, alphas, xid, yid):
+    """
+    计算余弦效率、阴影遮挡效率、大气透射率、光学效率等
+    """
+    # 余弦效率
+    eta_cos = np.zeros((12, 5, location.shape[0]))
+    for i in range(12):
+        for j in range(5):
+            n_dingri = s_in[i, 3*j:3*j+3] - s_reflect
+            n_dingri = n_dingri / np.linalg.norm(n_dingri, axis=1, keepdims=True)
+            
+            for k in range(location.shape[0]):
+                eta_cos[i, j, k] = abs(np.dot(n_dingri[k], s_in[i, 3*j:3*j+3]))
+    
+    # 阴影遮挡效率
+    eta_sb = 1 - shade * 5 / (xid * yid * 8)
+    
+    # 大气透射率
+    h = 4  # 定日镜高度
+    loc_jire = np.array([0, 0, 80])  # 集热器中心
+    d_HR = np.sqrt((location[:, 0] - loc_jire[0])**2 + 
+                   (location[:, 1] - loc_jire[1])**2 + 
+                   (h - loc_jire[2])**2)
+    eta_at = 0.99321 - 0.0001176 * d_HR + 1.97e-8 * d_HR**2
+    
+    # 扩展大气透射率到所有时间点
+    eta_at_full = np.broadcast_to(eta_at[np.newaxis, np.newaxis, :], (12, 5, location.shape[0]))
+    
+    # 镜面反射率
+    eta_ref = 0.92
+    
+    # 光学效率
+    eta = eta_sb * eta_cos * eta_at_full * ntrunc * eta_ref
+    
+    return eta_cos, eta_sb, eta_at_full, eta, eta_ref
+
+# 计算输出功率
+def calculate_power_output(eta, alphas, location, W=6, H=6):
+    """
+    计算定日镜场输出功率
+    """
+    # 计算DNI
+    DNI = np.zeros((12, 5))
+    for i in range(12):
+        for j in range(5):
+            DNI[i, j] = calculate_DNI(alphas[i, j])
+    
+    # 定日镜面积
+    A = W * H
+    
+    # 每块定日镜的输出功率
+    E = np.zeros((12, 5, location.shape[0]))
+    for i in range(12):
+        for j in range(5):
+            E[i, j, :] = DNI[i, j] * A * eta[i, j, :]
+    
+    # 镜场总功率
+    Ef = np.sum(E, axis=2)
+    
+    # 年平均功率
+    year_Ef = np.mean(Ef)
+    
+    # 单位面积年平均功率
+    total_area = location.shape[0] * A
+    year_Ef_per_area = year_Ef / total_area
+    
+    return E, Ef, year_Ef, year_Ef_per_area, DNI
+
+# 输出结果摘要
+def print_results_summary(eta_cos, eta_sb, eta_at, ntrunc, eta, year_Ef, year_Ef_per_area):
+    """
+    输出计算结果摘要
+    """
+    print("\n" + "="*60)
+    print("计算结果摘要")
+    print("="*60)
+    
+    # 计算年平均效率
+    year_eta_cos = np.mean(eta_cos)
+    year_eta_sb = np.mean(eta_sb) 
+    year_eta_at = np.mean(eta_at)
+    year_eta_trunc = np.mean(ntrunc)
+    year_eta = np.mean(eta)
+    
+    print(f"年平均余弦效率:     {year_eta_cos:.4f}")
+    print(f"年平均阴影遮挡效率: {year_eta_sb:.4f}")
+    print(f"年平均大气透射率:   {year_eta_at:.4f}")
+    print(f"年平均截断效率:     {year_eta_trunc:.4f}")
+    print(f"年平均光学效率:     {year_eta:.4f}")
+    print(f"年平均输出功率:     {year_Ef:.2f} kW")
+    print(f"年平均单位面积功率: {year_Ef_per_area:.4f} kW/m²")
+    print("="*60)
 
 def main():
     # 参数设置
@@ -147,87 +269,190 @@ def main():
     W, H = 6, 6  # 定日镜宽度和高度
     
     # 计算阴影遮挡和截断效率
-    for i in range(12):  # 月份
-        for j in range(5):  # 时刻
-            # 确定每个定日镜的法向量
-            n_dingri = s_in[i, 3*j:3*j+3] - s_reflect
-            n_dingri = n_dingri / np.linalg.norm(n_dingri, axis=1, keepdims=True)
-            
-            # 计算定日镜四个角点坐标
-            v1 = np.column_stack([n_dingri[:, 1], -n_dingri[:, 0], np.zeros(n_dingri.shape[0])])
-            v2 = np.column_stack([-n_dingri[:, 0] * n_dingri[:, 2], 
-                                -n_dingri[:, 1] * n_dingri[:, 2],
-                                n_dingri[:, 1]**2 + n_dingri[:, 0]**2])
-            
-            v1 = v1 / np.linalg.norm(v1, axis=1, keepdims=True)
-            v2 = v2 / np.linalg.norm(v2, axis=1, keepdims=True)
-            
-            # 四个角点
-            xp1 = location[:, 0] + W * v1[:, 0] / 2 + H * v2[:, 0] / 2
-            yp1 = location[:, 1] + W * v1[:, 1] / 2 + H * v2[:, 1] / 2
-            zp1 = h + W * v1[:, 2] / 2 + H * v2[:, 2] / 2
-            
-            xp2 = location[:, 0] - W * v1[:, 0] / 2 + H * v2[:, 0] / 2
-            yp2 = location[:, 1] - W * v1[:, 1] / 2 + H * v2[:, 1] / 2
-            zp2 = h - W * v1[:, 2] / 2 + H * v2[:, 2] / 2
-            
-            xp3 = location[:, 0] - W * v1[:, 0] / 2 - H * v2[:, 0] / 2
-            yp3 = location[:, 1] - W * v1[:, 1] / 2 - H * v2[:, 1] / 2
-            zp3 = h - W * v1[:, 2] / 2 - H * v2[:, 2] / 2
-            
-            xp4 = location[:, 0] + W * v1[:, 0] / 2 - H * v2[:, 0] / 2
-            yp4 = location[:, 1] + W * v1[:, 1] / 2 - H * v2[:, 1] / 2
-            zp4 = h + W * v1[:, 2] / 2 - H * v2[:, 2] / 2
-            
-            # 栅格化计算
-            dl = H / 5  # 分网格
-            xid, yid = int(W / dl), int(H / dl)
-            
-            # 阴影遮挡计算
-            for k in range(min(10, len(location))):  # 限制计算数量以加快速度
-                shade1 = np.zeros((xid, yid))
+    print("开始计算阴影遮挡和截断效率...")
+    total_calculations = 12 * 5 * location.shape[0]  # 总计算量
+    
+    # 使用tqdm创建进度条，显示速度、剩余时间等信息
+    with tqdm(total=total_calculations, 
+              desc="计算进度", 
+              ncols=60,
+              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+        
+        start_time = time.time()
+        for i in range(12):  # 月份
+            for j in range(5):  # 时刻
+                # 更新进度条描述，显示当前处理的月份和时刻
+                pbar.set_description(f"{i}-{j}")
                 
-                for ii in range(min(3, xid)):  # 简化网格计算
-                    for jj in range(min(3, yid)):
-                        # 格子中心坐标
-                        xi = xp2[k] + jj * dl * v1[k, 0] - ii * dl * v2[k, 0] - dl * v1[k, 0] / 2 + dl * v2[k, 0] / 2
-                        yi = yp2[k] + jj * dl * v1[k, 1] - ii * dl * v2[k, 1] - dl * v1[k, 1] / 2 + dl * v2[k, 1] / 2
-                        zi = zp2[k] + jj * dl * v1[k, 2] - ii * dl * v2[k, 2] - dl * v1[k, 2] / 2 + dl * v2[k, 2] / 2
+                # 确定每个定日镜的法向量
+                n_dingri = s_in[i, 3*j:3*j+3] - s_reflect
+                n_dingri = n_dingri / np.linalg.norm(n_dingri, axis=1, keepdims=True)
+            
+                # 计算定日镜四个角点坐标
+                
+                v1 = np.column_stack([n_dingri[:, 1], -n_dingri[:, 0], np.zeros(n_dingri.shape[0])])
+                
+                '''v2 = np.column_stack([-n_dingri[:, 0] * n_dingri[:, 2], 
+                                    -n_dingri[:, 1] * n_dingri[:, 2],
+                                    n_dingri[:, 1]**2 + n_dingri[:, 0]**2])
+                '''
+                v2 = np.cross(n_dingri, v1)  # 计算垂直于法向量的第二个方向
+                v1 = v1 / np.linalg.norm(v1, axis=1, keepdims=True)
+                v2 = v2 / np.linalg.norm(v2, axis=1, keepdims=True)
+                
+                # 四个角点
+                xp1 = location[:, 0] + W * v1[:, 0] / 2 + H * v2[:, 0] / 2
+                yp1 = location[:, 1] + W * v1[:, 1] / 2 + H * v2[:, 1] / 2
+                zp1 = h + W * v1[:, 2] / 2 + H * v2[:, 2] / 2
+                
+                xp2 = location[:, 0] - W * v1[:, 0] / 2 + H * v2[:, 0] / 2
+                yp2 = location[:, 1] - W * v1[:, 1] / 2 + H * v2[:, 1] / 2
+                zp2 = h - W * v1[:, 2] / 2 + H * v2[:, 2] / 2
+                
+                xp3 = location[:, 0] - W * v1[:, 0] / 2 - H * v2[:, 0] / 2
+                yp3 = location[:, 1] - W * v1[:, 1] / 2 - H * v2[:, 1] / 2
+                zp3 = h - W * v1[:, 2] / 2 - H * v2[:, 2] / 2
+                
+                xp4 = location[:, 0] + W * v1[:, 0] / 2 - H * v2[:, 0] / 2
+                yp4 = location[:, 1] + W * v1[:, 1] / 2 - H * v2[:, 1] / 2
+                zp4 = h + W * v1[:, 2] / 2 - H * v2[:, 2] / 2
+                
+                # 栅格化计算
+                dl = H / 5  # 分网格
+                xid, yid = int(W / dl), int(H / dl)
+                
+                # 阴影遮挡计算
+                for k in range(len(location)):  
+                    # 计算进度
+                    
+                    # print(f"计算 {i + 1} 月第 {j + 1}/5 时刻定日镜 {k+1}/{len(location)} 的阴影遮挡...", end="", flush=True)
+                    shade1 = np.zeros((xid, yid))
+                    
+                    for ii in range(xid):  # 简化网格计算
+                        for jj in range(yid):
+                            # 格子中心坐标
+                            xi = xp2[k] + jj * dl * v1[k, 0] - ii * dl * v2[k, 0] - dl * v1[k, 0] / 2 + dl * v2[k, 0] / 2
+                            yi = yp2[k] + jj * dl * v1[k, 1] - ii * dl * v2[k, 1] - dl * v1[k, 1] / 2 + dl * v2[k, 1] / 2
+                            zi = zp2[k] + jj * dl * v1[k, 2] - ii * dl * v2[k, 2] - dl * v1[k, 2] / 2 + dl * v2[k, 2] / 2
+                            
+                            # 简化阴影检测 - 只检查最近的几个定日镜（在二维平面上计算距离）
+                            nearest_indices = np.argsort(np.linalg.norm(location - [xi, yi], axis=1))[:5]
+                            for kk in nearest_indices: # kk为最近的定日镜索引
+                                if kk == k:
+                                    continue
+                                    
+                                # 计算入射光线与其他定日镜的交点
+                                try:
+                                    # 计算平面与光线在kk定日镜所在平面的交点
+                                    px1, py1, pz1 = calc_plane_line_intersect_point(
+                                        n_dingri[kk], [location[kk, 0], location[kk, 1], h],
+                                        s_in[i, 3*j:3*j+3], [xi, yi, zi]
+                                    )
+                                    
+                                    if px1 is not None:
+                                        # 检查点是否在kk定日镜的矩形区域内
+                                        if is_point_in_rectangular(px1, py1, pz1,
+                                                                np.array([[xp1[kk], yp1[kk], zp1[kk]],
+                                                                        [xp2[kk], yp2[kk], zp2[kk]],
+                                                                        [xp3[kk], yp3[kk], zp3[kk]],
+                                                                        [xp4[kk], yp4[kk], zp4[kk]]])
+                                        ):
+                                            shade1[ii, jj] = 1
+                                            shade[i, j, k] += 1
+                                            break
+                                except:
+                                    continue
+                    
+                    # 计算截断效率
+                    if np.sum(shade1) == xid * yid:
+                        ntrunc[i, j, k] = np.inf
+                        continue
+                    
+                    # 定日镜到集热器中心距离
+                    d = np.sqrt(location[k, 0]**2 + location[k, 1]**2 + (h - 80)**2)
+                    r = 4.65e-3 * d  # 光斑半径（太阳锥角4.65mrad）
+                    
+                    # 集热器限制参数
+                    xlimit = 3.5 - r
+                    ylimit = 4 - r
+                    
+                    # 不考虑阴影的定日镜总输出光功率
+                    light_out = (W + 2*r) * (H + 2*r)
+                    
+                    # 不考虑阴影的集热器总接收光功率
+                    light_in = min(8, 2*r + H) * min(7, 2*r + W)
+                    
+                    # 处理有阴影的栅格
+                    xx, yy = np.where(shade1 > 0)  # 阴影栅格索引
+                    
+                    for ix in range(len(xx)):
+                        # 栅格在定日镜局部坐标系中的位置
+                        yi_local = H/2 - xx[ix]*dl + dl/2
+                        xi_local = -W/2 + yy[ix]*dl - dl/2
                         
-                        # 简化阴影检测 - 只检查最近的几个定日镜
-                        for kk in range(min(3, len(location))):
-                            if kk == k:
-                                continue
-                                
-                            # 计算入射光线与其他定日镜的交点
-                            try:
-                                px1, py1, pz1 = calc_plane_line_intersect_point(
-                                    n_dingri[kk], [location[kk, 0], location[kk, 1], h],
-                                    s_in[i, 3*j:3*j+3], [xi, yi, zi]
-                                )
-                                
-                                if px1 is not None:
-                                    # 简化的阴影判断
-                                    dist_to_intersect = np.sqrt((xi - px1)**2 + (yi - py1)**2 + (zi - pz1)**2)
-                                    if dist_to_intersect < W:  # 简化判断条件
-                                        shade1[ii, jj] = 1
-                                        shade[i, j, k] += 1
-                                        break
-                            except:
-                                continue
-                
-                # 计算截断效率（简化版本）
-                if np.sum(shade1) == xid * yid:
-                    ntrunc[i, j, k] = 0.5  # 给一个默认值
-                    continue
-                
-                # 定日镜到集热器中心距离
-                d = np.sqrt(location[k, 0]**2 + location[k, 1]**2 + (h - 80)**2)
-                r = 4.65e-3 * d  # 光斑半径
-                
-                # 简化的截断效率计算
-                shadow_ratio = np.sum(shade1) / (xid * yid)
-                ntrunc[i, j, k] = max(0.5, 1.0 - shadow_ratio * 0.3)  # 简化公式
+                        # 判断栅格位置类型并计算相应的光功率损失
+                        is_corner = ((xx[ix] == 0 and yy[ix] == 0) or 
+                                (xx[ix] == 0 and yy[ix] == xid-1) or 
+                                (xx[ix] == yid-1 and yy[ix] == 0) or 
+                                (xx[ix] == yid-1 and yy[ix] == xid-1))
+                        
+                        is_left_right_edge = ((xx[ix] == 0 and 0 < yy[ix] < xid-1) or 
+                                            (xx[ix] == yid-1 and 0 < yy[ix] < xid-1))
+                        
+                        is_top_bottom_edge = ((yy[ix] == 0 and 0 < xx[ix] < yid-1) or 
+                                            (yy[ix] == xid-1 and 0 < xx[ix] < yid-1))
+                        
+                        if is_corner:  # 四个角
+                            if r + abs(xi_local) + dl/2 < 3.5:  # 集热器完全吸收
+                                light_out -= (dl + r)**2
+                                light_in -= (dl + r)**2
+                            elif r + abs(yi_local) + dl/2 < 4:  # 上下完全吸收，左右溢出
+                                light_out -= (dl + r)**2
+                                light_in -= (dl/2 + 3.5 - abs(xi_local)) * (dl + r)
+                            else:  # 上下左右都溢出
+                                light_out -= (dl + r)**2
+                                light_in -= (dl/2 + 3.5 - abs(xi_local)) * (dl/2 + 4 - abs(yi_local))
+                        
+                        elif is_left_right_edge:  # 左右边缘
+                            if r + abs(yi_local) + dl/2 < 4:  # 集热器完全吸收
+                                light_out -= (dl + r) * dl
+                                light_in -= (dl + r) * dl
+                            else:  # 上下溢出
+                                light_out -= (dl + r) * dl
+                                light_in -= (dl/2 + 4 - abs(yi_local)) * dl
+                        
+                        elif is_top_bottom_edge:  # 上下边缘
+                            if r + abs(xi_local) + dl/2 < 3.5:  # 集热器完全吸收
+                                light_out -= (dl + r) * dl
+                                light_in -= (dl + r) * dl
+                            else:  # 左右溢出
+                                light_out -= (dl + r) * dl
+                                light_in -= (dl/2 + 3.5 - abs(xi_local)) * dl
+                        
+                        else:  # 中心区域
+                            light_out -= dl**2
+                            light_in -= dl**2
+                    
+                    # 计算截断效率
+                    ntrunc[i, j, k] = light_in / light_out if light_out > 0 else np.inf
+                    
+                    # 更新进度条
+                    pbar.update(1)
+        
+        # 计算完成，显示统计信息
+        total_time = time.time() - start_time
+        pbar.set_description(f"计算完成! 耗时: {total_time:.1f}秒")
+    
+    print(f"\n截断效率计算完成，总耗时: {total_time:.2f}秒")
+    
+    # 计算各种效率指标
+    eta_cos, eta_sb, eta_at, eta, eta_ref = calculate_efficiencies(shade, ntrunc, s_in, s_reflect, location, alphas, xid, yid)
+    
+    # 计算输出功率
+    E, Ef, year_Ef, year_Ef_per_area, DNI = calculate_power_output(eta, alphas, location)
+    
+    # 输出结果摘要
+    print_results_summary(eta_cos, eta_sb, eta_at, ntrunc, eta, year_Ef, year_Ef_per_area)
     
     # 保存结果
     with open('Q1_results.pkl', 'wb') as f:
@@ -237,7 +462,16 @@ def main():
             'alphas': alphas,
             'shade': shade,
             'ntrunc': ntrunc,
-            's_reflect': s_reflect
+            's_reflect': s_reflect,
+            'eta_cos': eta_cos,
+            'eta_sb': eta_sb,
+            'eta_at': eta_at,
+            'eta': eta,
+            'E': E,
+            'Ef': Ef,
+            'year_Ef': year_Ef,
+            'year_Ef_per_area': year_Ef_per_area,
+            'DNI': DNI
         }, f)
     
     print("问题一计算完成，结果已保存到 Q1_results.pkl")
