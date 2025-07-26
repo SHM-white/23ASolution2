@@ -88,11 +88,7 @@ def point_in_triangle(px, py, pz, A, B, C):
     cross_CA_CB = np.cross(-V13, -V23)
     
     # 判断是否满足条件
-    cond1 = np.dot(cross_AB_AP, cross_AB_AC) > 0
-    cond2 = np.dot(cross_BC_BP, cross_BC_BA) > 0
-    cond3 = np.dot(cross_CA_CP, cross_CA_CB) > 0
-    
-    return cond1 and cond2 and cond3
+    return np.dot(cross_AB_AP, cross_AB_AC) > 0 and np.dot(cross_BC_BP, cross_BC_BA) > 0 and np.dot(cross_CA_CP, cross_CA_CB) > 0
 
 # 判断点是否在矩形内部
 def is_point_in_rectangular(px, py, pz, rectangular):
@@ -277,6 +273,20 @@ def calculate_results(H, W, location, loc_jire, h):
     shade = np.zeros((12, 5, location.shape[0]))  # 阴影
     ntrunc = np.zeros((12, 5, location.shape[0]))  # 截断效率
     
+    # 性能优化：预计算所有定日镜的最近邻（避免重复计算）
+    print("预计算最近邻以加速计算...")
+    from scipy.spatial import cKDTree
+    try:
+        kdtree = cKDTree(location)
+        neighbors_cache = {}
+        for k in range(location.shape[0]):
+            _, indices = kdtree.query(location[k], k=6)  # 包括自己
+            neighbors_cache[k] = indices[1:]  # 排除自己，保留5个最近邻
+        print("最近邻预计算完成")
+    except ImportError:
+        print("未安装scipy，使用原始方法")
+        neighbors_cache = None
+    
     
     
     # 计算阴影遮挡和截断效率
@@ -339,9 +349,12 @@ def calculate_results(H, W, location, loc_jire, h):
                     # 计算遮挡效率
                     shade1 = np.zeros((xid, yid))
                     
-                    # 计算当前定日镜k最近的几个定日镜（在二维平面上计算距离）
-                    distances = np.linalg.norm(location - location[k], axis=1)
-                    nearest_indices = np.argsort(distances)[1:7]  # 排除自己，取最近的6个
+                    # 计算当前定日镜k最近的几个定日镜（优化：使用预计算的邻居）
+                    if neighbors_cache is not None:
+                        nearest_indices = neighbors_cache[k]
+                    else:
+                        distances = np.linalg.norm(location - location[k], axis=1)
+                        nearest_indices = np.argsort(distances)[1:6]  
                     
                     for ii in range(xid):  # 简化网格计算
                         for jj in range(yid):
