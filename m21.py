@@ -3,9 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 from scipy.optimize import minimize_scalar
+from m11 import calculate_results
 
 # 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
+plt.rcParams['font.sans-serif'] = ['黑体', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决保存图像是负号'-'显示为方块的问题
 
 def objfun2(H, W, h, D, location):
@@ -14,71 +15,81 @@ def objfun2(H, W, h, D, location):
     
     参数:
     H, W, h: 定日镜高度、宽度、安装高度
-    D: 吸收塔向南移动距离
-    location: 定日镜位置
+    D: 吸收塔向南移动距离（正值表示向南移动）
+    location: 定日镜位置（相对于原坐标系原点）
     
     返回:
     year_EF: 年平均输出热功率
     year_EF_per_area: 单位面积年平均输出热功率
     """
+    s_in, alphas, shade, ntrunc, s_reflect, eta_cos, eta_sb, eta_at, eta, E, Ef, year_Ef, year_Ef_per_area, DNI = calculate_results(H, W, location, np.array([0, -D, 80]), h)
+    return year_Ef, year_Ef_per_area
+
+# 重写生成定日镜位置函数
+def generate_heliostats(D, W):
+    """
+    生成定日镜位置
     
-    # 这里是简化的目标函数，实际应该调用完整的光学效率计算
-    # 基于问题一的算法进行计算
+    参数:
+    D: 吸收塔向南移动距离（正值表示向南移动）
+    W: 定日镜宽度
     
-    loc_jire = np.array([0, -D, 80])  # 集热器中心坐标（向南移动D）
-    loc_dingri = np.column_stack([location, h * np.ones(location.shape[0])])
+    返回:
+    定日镜位置坐标数组（相对于原坐标系原点(0,0)）
+    """
+    dr = W + 5  # 相邻定日镜间距
     
-    # 反射光线方向向量
-    s_reflect = loc_jire - loc_dingri
-    s_reflect = s_reflect / np.linalg.norm(s_reflect, axis=1, keepdims=True)
+    # 吸收塔位置：向南移动D距离，即y坐标为-D
+    tower_x, tower_y = 0, -D
     
-    # 简化计算 - 实际应该包含完整的阴影遮挡和截断效率计算
-    # 这里使用简化公式估算
+    # 以吸收塔为中心，生成同心圆布局
+    R = np.arange(100, 350 + dr + abs(D), dr)  # 半径范围
     
-    # 距离因子（越远效率越低）
-    distances = np.sqrt((location[:, 0] - 0)**2 + (location[:, 1] + D)**2 + h**2)
-    distance_factor = 1.0 / (1.0 + distances / 1000.0)
-    
-    # 余弦效率近似（基于定日镜朝向）
-    cos_efficiency = 0.8 * distance_factor
-    
-    # 大气透射率
-    eta_at = 0.99321 - 0.0001176 * distances + 1.97e-8 * distances**2
-    
-    # 阴影遮挡效率近似
-    eta_sb = 0.85 * np.ones(len(location))
-    
-    # 截断效率近似
-    eta_trunc = 0.80 * np.ones(len(location))
-    
-    # 镜面反射率
-    eta_ref = 0.92
-    
-    # 总光学效率
-    eta_total = cos_efficiency * eta_at * eta_sb * eta_trunc * eta_ref
-    
-    # DNI计算
-    G0 = 1.366
-    altitude = 3
-    a = 0.4237 - 0.00821 * (6 - altitude)**2
-    b = 0.5055 + 0.00595 * (6.5 - altitude)**2
-    c = 0.2711 + 0.01858 * (2.5 - altitude)**2
-    
-    # 假设平均太阳高度角
-    alpha_avg = np.pi / 4  # 45度
-    DNI = G0 * (a + b * np.exp(-c / np.sin(alpha_avg)))
-    
-    # 镜面面积
-    A = W * H
-    
-    # 总功率
-    total_power = np.sum(DNI * A * eta_total)  # kW
-    
-    # 单位面积功率
-    total_area = len(location) * A
-    power_per_area = total_power / total_area
-    
-    return total_power, power_per_area
+    x, y = [], []
+    # 遍历每个半径
+    for i, r in enumerate(R):
+        # 计算角度边界，确保定日镜在350m圆形区域内
+        # 需要判断以塔为中心、半径为r的圆与350m边界圆的交点
+        if D == 0:  # 塔在中心时
+            theta_bond = -np.pi / 2
+        else:
+            # 计算角度限制，确保定日镜不超出350m边界
+            # 使用几何关系：塔心到原点距离为D，圆半径为r，边界半径为350
+            distance_to_origin = abs(D)
+            if r + distance_to_origin <= 350:
+                # 整个圆都在边界内
+                theta_bond = -np.pi / 2
+            else:
+                # 部分圆超出边界，需要计算限制角度
+                # 使用余弦定理计算角度
+                if distance_to_origin + r <= 350:
+                    theta_bond = -np.pi / 2
+                elif abs(r - distance_to_origin) >= 350:
+                    continue  # 整个圆都在边界外，跳过
+                else:
+                    # 计算交点角度
+                    cos_theta = (r**2 + distance_to_origin**2 - 350**2) / (2 * r * distance_to_origin)
+                    cos_theta = np.clip(cos_theta, -1, 1)
+                    theta_bond = np.arccos(cos_theta)
+                    theta_bond = np.pi/2 - theta_bond  # 转换到合适的角度系统
+        
+        # 放置定日镜
+        beta = dr / r  # 角度间隔
+        theta_start = (-1)**i * beta / 4 + theta_bond + beta / 2
+        theta_end = np.pi - theta_bond - beta / 4
+
+        if theta_end > theta_start and beta > 0:
+            theta_range = np.arange(theta_start, theta_end, beta)
+            
+            # 计算相对于吸收塔的极坐标，然后转换为相对于原点的直角坐标
+            x_rel_tower = r * np.cos(theta_range)  # 相对于塔的x坐标
+            y_rel_tower = r * np.sin(theta_range)  # 相对于塔的y坐标
+            
+            # 转换为相对于原点(0,0)的坐标
+            x.extend(x_rel_tower + tower_x)  # tower_x = 0
+            y.extend(y_rel_tower + tower_y)  # tower_y = -D
+
+    return np.column_stack([x, y])
 
 def ternary_search_D():
     """使用三分查找优化吸收塔位置"""
@@ -92,34 +103,6 @@ def ternary_search_D():
     min_d = 0
     max_d = 250
     
-    # 生成定日镜位置（简化）
-    def generate_heliostats(D):
-        dr = W + 5  # 相邻定日镜间距
-        R = np.arange(100, min(350, 350 + D) + dr, dr)  # 半径范围，避免超出边界
-        
-        x, y = [], []
-        
-        for i, r in enumerate(R):
-            if r < 350 - abs(D):  # 使用绝对值避免负数
-                theta_bond = -np.pi / 2
-            else:
-                # 避免arcsin的参数超出范围
-                arg = (r**2 + D**2 - 350**2) / (2 * r * abs(D))
-                arg = np.clip(arg, -1, 1)  # 限制在[-1,1]范围内
-                theta_bond = np.arcsin(arg)
-            
-            beta = dr / r  # 角度间隔
-            theta_start = (-1)**i * beta / 4 + theta_bond + beta / 2
-            theta_end = np.pi - theta_bond - beta / 4
-            
-            # 确保theta_start < theta_end且步长为正
-            if theta_end > theta_start and beta > 0:
-                theta_range = np.arange(theta_start, theta_end, beta)
-                
-                x.extend(r * np.cos(theta_range))
-                y.extend(r * np.sin(theta_range))
-        
-        return np.column_stack([x, y])
     
     iteration = 0
     max_iterations = 50
@@ -129,8 +112,8 @@ def ternary_search_D():
         right_d = min_d + 2 * (max_d - min_d) / 3
         
         # 计算左点和右点的目标函数值
-        location_left = generate_heliostats(left_d)
-        location_right = generate_heliostats(right_d)
+        location_left = generate_heliostats(left_d, W)
+        location_right = generate_heliostats(right_d, W)
         
         _, power_per_area_left = objfun2(H, W, h, left_d, location_left)
         _, power_per_area_right = objfun2(H, W, h, right_d, location_right)
@@ -147,7 +130,7 @@ def ternary_search_D():
     
     # 最优值
     optimal_D = (min_d + max_d) / 2
-    location_optimal = generate_heliostats(optimal_D)
+    location_optimal = generate_heliostats(optimal_D, W)
     total_power, power_per_area = objfun2(H, W, h, optimal_D, location_optimal)
     
     print("\n" + "="*60)
@@ -192,34 +175,58 @@ def ternary_search_W():
     max_w = 7
     
     # 生成定日镜位置函数
-    def generate_heliostats_w(W):
-        H = W  # 假设宽高相等
-        dr = W + 5
-        R = np.arange(100, min(350, 350 + D) + dr, dr)
+    # def generate_heliostats_w(W):
+    #     H = W  # 假设宽高相等
+    #     dr = W + 5
         
-        x, y = [], []
+    #     # 吸收塔位置：向南移动D距离，即y坐标为-D
+    #     tower_x, tower_y = 0, -D
         
-        for i, r in enumerate(R):
-            if r < 350 - abs(D):
-                theta_bond = -np.pi / 2
-            else:
-                # 避免arcsin的参数超出范围
-                arg = (r**2 + D**2 - 350**2) / (2 * r * abs(D))
-                arg = np.clip(arg, -1, 1)
-                theta_bond = np.arcsin(arg)
+    #     # 以吸收塔为中心，生成同心圆布局
+    #     R = np.arange(100, 350 + dr, dr)  # 半径范围
+        
+    #     x, y = [], []
+        
+    #     for i, r in enumerate(R):
+    #         # 计算角度边界，确保定日镜在350m圆形区域内
+    #         if D == 0:  # 塔在中心时
+    #             theta_bond = -np.pi / 2
+    #         else:
+    #             # 计算角度限制，确保定日镜不超出350m边界
+    #             distance_to_origin = abs(D)
+    #             if r + distance_to_origin <= 350:
+    #                 # 整个圆都在边界内
+    #                 theta_bond = -np.pi / 2
+    #             else:
+    #                 # 部分圆超出边界，需要计算限制角度
+    #                 if distance_to_origin + r <= 350:
+    #                     theta_bond = -np.pi / 2
+    #                 elif abs(r - distance_to_origin) >= 350:
+    #                     continue  # 整个圆都在边界外，跳过
+    #                 else:
+    #                     # 计算交点角度
+    #                     cos_theta = (r**2 + distance_to_origin**2 - 350**2) / (2 * r * distance_to_origin)
+    #                     cos_theta = np.clip(cos_theta, -1, 1)
+    #                     theta_bond = np.arccos(cos_theta)
+    #                     theta_bond = np.pi/2 - theta_bond
             
-            beta = dr / r
-            theta_start = (-1)**i * beta / 4 + theta_bond + beta / 2
-            theta_end = np.pi - theta_bond - beta / 4
+    #         beta = dr / r
+    #         theta_start = (-1)**i * beta / 4 + theta_bond + beta / 2
+    #         theta_end = np.pi - theta_bond - beta / 4
             
-            # 确保有效的角度范围
-            if theta_end > theta_start and beta > 0:
-                theta_range = np.arange(theta_start, theta_end, beta)
+    #         # 确保有效的角度范围
+    #         if theta_end > theta_start and beta > 0:
+    #             theta_range = np.arange(theta_start, theta_end, beta)
                 
-                x.extend(r * np.cos(theta_range))
-                y.extend(r * np.sin(theta_range))
+    #             # 计算相对于吸收塔的极坐标，然后转换为相对于原点的直角坐标
+    #             x_rel_tower = r * np.cos(theta_range)  # 相对于塔的x坐标
+    #             y_rel_tower = r * np.sin(theta_range)  # 相对于塔的y坐标
+                
+    #             # 转换为相对于原点(0,0)的坐标
+    #             x.extend(x_rel_tower + tower_x)  # tower_x = 0
+    #             y.extend(y_rel_tower + tower_y)  # tower_y = -D
         
-        return np.column_stack([x, y])
+    #     return np.column_stack([x, y])
     
     iteration = 0
     max_iterations = 50
@@ -229,9 +236,9 @@ def ternary_search_W():
         right_w = min_w + 2 * (max_w - min_w) / 3
         
         # 计算目标函数值
-        location_left = generate_heliostats_w(left_w)
-        location_right = generate_heliostats_w(right_w)
-        
+        location_left = generate_heliostats(D, left_w)
+        location_right = generate_heliostats(D, right_w)
+
         _, power_per_area_left = objfun2(left_w, left_w, h, D, location_left)
         _, power_per_area_right = objfun2(right_w, right_w, h, D, location_right)
         
@@ -278,6 +285,46 @@ def ternary_search_W():
     
     return optimal_W, results
 
+def visualize_layout(D, location, title="定日镜布局"):
+    """可视化定日镜布局"""
+    plt.figure(figsize=(12, 10))
+    
+    # 绘制定日镜位置
+    plt.scatter(location[:, 0], location[:, 1], c='blue', s=20, alpha=0.6, label='定日镜')
+    
+    # 绘制吸收塔位置
+    tower_x, tower_y = 0, -D
+    plt.scatter(tower_x, tower_y, c='red', s=200, marker='^', label=f'吸收塔 (0, {-D:.1f})')
+    
+    # 绘制350m边界圆
+    circle = plt.Circle((0, 0), 350, fill=False, color='green', linestyle='--', label='350m边界')
+    plt.gca().add_patch(circle)
+    
+    # 绘制以吸收塔为中心的同心圆（验证布局）
+    for r in [100, 150, 200, 250, 300]:
+        if r <= 350:
+            circle_tower = plt.Circle((tower_x, tower_y), r, fill=False, color='gray', alpha=0.3, linestyle=':')
+            plt.gca().add_patch(circle_tower)
+    
+    plt.axis('equal')
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('X坐标 (m)')
+    plt.ylabel('Y坐标 (m)')
+    plt.title(f'{title} (D={D:.1f}m)')
+    plt.legend()
+    
+    # 设置坐标轴范围
+    plt.xlim(-400, 400)
+    plt.ylim(-400, 400)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # 输出统计信息
+    print(f"定日镜总数: {len(location)}")
+    print(f"吸收塔位置: (0, {-D:.1f})")
+    print(f"定日镜分布范围: X=[{location[:, 0].min():.1f}, {location[:, 0].max():.1f}], Y=[{location[:, 1].min():.1f}, {location[:, 1].max():.1f}]")
+
 def main():
     """主函数"""
     print("开始问题二优化...")
@@ -285,8 +332,15 @@ def main():
     print("\n第一步：优化吸收塔位置...")
     optimal_D, d_results = ternary_search_D()
     
+    # 可视化D优化结果
+    location_d = generate_heliostats(optimal_D)
+    visualize_layout(optimal_D, location_d, "吸收塔位置优化结果")
+    
     print("\n第二步：优化定日镜宽度...")
     optimal_W, w_results = ternary_search_W()
+    
+    # 可视化最终结果
+    visualize_layout(w_results['optimal_D'], w_results['location'], "最终优化结果")
     
     print("\n" + "="*60)
     print("问题二最终优化结果")
@@ -316,4 +370,17 @@ def main():
     return final_results
 
 if __name__ == "__main__":
+    # 首先测试布局是否正确
+    print("测试定日镜布局...")
+    
+    # 测试不同D值的布局
+    test_D_values = [0, 100, 200]
+    for D in test_D_values:
+        print(f"\n测试 D = {D}:")
+        location = generate_heliostats(D)
+        print(f"定日镜数量: {len(location)}, 吸收塔位置: (0, {-D})")
+    
+    print("\n布局测试完成，开始运行完整优化...")
+    
+    # 运行主优化程序
     results = main()

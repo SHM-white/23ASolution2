@@ -8,7 +8,7 @@ from tqdm import tqdm
 import time
 
 # 设置中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
+plt.rcParams['font.sans-serif'] = ['黑体', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决保存图像是负号'-'显示为方块的问题
 
 # 计算DNI法向直接辐射照度
@@ -79,7 +79,7 @@ def point_in_triangle(px, py, pz, A, B, C):
     V13 = C - A
     V23 = C - B
     
-    # 计算叉积和点积，符合Matlab逻辑
+    # 计算叉积
     cross_AB_AP = np.cross(V12, V1q)
     cross_AB_AC = np.cross(V12, V13)
     cross_BC_BP = np.cross(V23, V2q)
@@ -132,7 +132,7 @@ def calculate_efficiencies(shade, ntrunc, s_in, s_reflect, location, alphas, xid
                 eta_cos[i, j, k] = abs(np.dot(n_dingri[k], s_in[i, 3*j:3*j+3]))
     
     # 阴影遮挡效率
-    eta_sb = 1 - shade * 5 / (xid * yid * 8)
+    eta_sb = 1 - shade  # shade现在是遮挡比例（0-1），效率就是1减去遮挡比例
     
     # 大气透射率
     h = 4  # 定日镜高度
@@ -210,14 +210,19 @@ def print_results_summary(eta_cos, eta_sb, eta_at, ntrunc, eta, year_Ef, year_Ef
     print(f"年平均单位面积功率: {year_Ef_per_area:.4f} kW/m²")
     print("="*60)
 
-def main():
-    # 参数设置
-    location = read_data()  # 定日镜xy坐标
-    loc_jire = np.array([0, 0, 80])  # 集热器中心坐标
-    h = 4  # 定日镜高度
+def calculate_results(H, W, location, loc_jire, h):
+    """计算在输入定日镜和集热器布局下的光学效率等结果
+
+    Args:
+        H (float): 定日镜高度
+        W (float): 定日镜宽度
+        location (np.array): 定日镜位置坐标
+        loc_jire (np.array): 集热器位置坐标
+        h (float): 定日镜高度
+    """
+
     loc_dingri = np.column_stack([location, h * np.ones(location.shape[0])])  # 定日镜中心坐标
-    
-    # 反射光线的方向向量
+        # 反射光线的方向向量
     s_reflect = loc_jire - loc_dingri
     s_reflect = s_reflect / np.linalg.norm(s_reflect, axis=1, keepdims=True)  # 单位化
     
@@ -248,10 +253,16 @@ def main():
             cos_gamma = (np.sin(delta) - np.sin(alphas[i, j]) * np.sin(phi)) / (np.cos(alphas[i, j]) * np.cos(phi))
             # 限制cos_gamma在[-1, 1]范围内，避免arccos错误
             cos_gamma = np.clip(cos_gamma, -1, 1)
-            gamas[i, j] = np.arccos(cos_gamma)
+            gamma_temp = np.arccos(cos_gamma)
             
-            # 入射光的方向向量
-            s_in_temp = -np.array([np.sin(gamas[i, j]), np.cos(gamas[i, j]), np.tan(alphas[i, j])])
+            # 考虑太阳方位角的方向：上午为负，下午为正（相对于正南方向）
+            if w < 0:  # 上午
+                gamas[i, j] = -gamma_temp
+            else:  # 下午
+                gamas[i, j] = gamma_temp
+            
+            # 入射光的方向向量（从太阳指向地面）
+            s_in_temp = -np.array([np.sin(gamas[i, j]), np.cos(gamas[i, j]), -np.tan(alphas[i, j])])
             s_in[i, 3*j:3*j+3] = s_in_temp / np.linalg.norm(s_in_temp)  # 单位化
     
     # 处理对称时刻
@@ -266,7 +277,7 @@ def main():
     shade = np.zeros((12, 5, location.shape[0]))  # 阴影
     ntrunc = np.zeros((12, 5, location.shape[0]))  # 截断效率
     
-    W, H = 6, 6  # 定日镜宽度和高度
+    
     
     # 计算阴影遮挡和截断效率
     print("开始计算阴影遮挡和截断效率...")
@@ -324,9 +335,13 @@ def main():
                 # 阴影遮挡计算
                 for k in range(len(location)):  
                     # 计算进度
-                    
                     # print(f"计算 {i + 1} 月第 {j + 1}/5 时刻定日镜 {k+1}/{len(location)} 的阴影遮挡...", end="", flush=True)
+                    # 计算遮挡效率
                     shade1 = np.zeros((xid, yid))
+                    
+                    # 计算当前定日镜k最近的几个定日镜（在二维平面上计算距离）
+                    distances = np.linalg.norm(location - location[k], axis=1)
+                    nearest_indices = np.argsort(distances)[1:7]  # 排除自己，取最近的6个
                     
                     for ii in range(xid):  # 简化网格计算
                         for jj in range(yid):
@@ -335,33 +350,33 @@ def main():
                             yi = yp2[k] + jj * dl * v1[k, 1] - ii * dl * v2[k, 1] - dl * v1[k, 1] / 2 + dl * v2[k, 1] / 2
                             zi = zp2[k] + jj * dl * v1[k, 2] - ii * dl * v2[k, 2] - dl * v1[k, 2] / 2 + dl * v2[k, 2] / 2
                             
-                            # 简化阴影检测 - 只检查最近的几个定日镜（在二维平面上计算距离）
-                            nearest_indices = np.argsort(np.linalg.norm(location - [xi, yi], axis=1))[:5]
+                            # 检查是否被其他定日镜遮挡
                             for kk in nearest_indices: # kk为最近的定日镜索引
-                                if kk == k:
-                                    continue
-                                    
-                                # 计算入射光线与其他定日镜的交点
+                                # 计算入射光线与其他定日镜的交点（只考虑入射光线的遮挡）
                                 try:
-                                    # 计算平面与光线在kk定日镜所在平面的交点
+                                    # 计算从网格点沿入射光线方向与kk定日镜平面的交点
                                     px1, py1, pz1 = calc_plane_line_intersect_point(
                                         n_dingri[kk], [location[kk, 0], location[kk, 1], h],
-                                        s_in[i, 3*j:3*j+3], [xi, yi, zi]
+                                        -s_in[i, 3*j:3*j+3], [xi, yi, zi]  # 入射光线方向（负号表示从太阳到网格点）
                                     )
                                     
                                     if px1 is not None:
-                                        # 检查点是否在kk定日镜的矩形区域内
+                                        # 检查交点是否在kk定日镜的矩形区域内
                                         if is_point_in_rectangular(px1, py1, pz1,
                                                                 np.array([[xp1[kk], yp1[kk], zp1[kk]],
                                                                         [xp2[kk], yp2[kk], zp2[kk]],
                                                                         [xp3[kk], yp3[kk], zp3[kk]],
                                                                         [xp4[kk], yp4[kk], zp4[kk]]])
                                         ):
-                                            shade1[ii, jj] = 1
-                                            shade[i, j, k] += 1
-                                            break
+                                            # 验证遮挡定日镜确实在光线路径上（z坐标检查）
+                                            if pz1 > zi:  # 遮挡定日镜在当前网格点上方
+                                                shade1[ii, jj] = 1
+                                                break  # 一旦发现遮挡就跳出
                                 except:
                                     continue
+                    
+                    # 累计阴影效果（修正：应该按网格比例计算，而不是简单累加）
+                    shade[i, j, k] = np.sum(shade1) / (xid * yid)
                     
                     # 计算截断效率
                     if np.sum(shade1) == xid * yid:
@@ -443,7 +458,7 @@ def main():
         total_time = time.time() - start_time
         pbar.set_description(f"计算完成! 耗时: {total_time:.1f}秒")
     
-    print(f"\n截断效率计算完成，总耗时: {total_time:.2f}秒")
+    
     
     # 计算各种效率指标
     eta_cos, eta_sb, eta_at, eta, eta_ref = calculate_efficiencies(shade, ntrunc, s_in, s_reflect, location, alphas, xid, yid)
@@ -453,7 +468,16 @@ def main():
     
     # 输出结果摘要
     print_results_summary(eta_cos, eta_sb, eta_at, ntrunc, eta, year_Ef, year_Ef_per_area)
-    
+    return s_in, alphas, shade, ntrunc, s_reflect, eta_cos, eta_sb, eta_at, eta, E, Ef, year_Ef, year_Ef_per_area, DNI
+
+def main():
+    # 参数设置
+    location = read_data()  # 定日镜xy坐标
+    h = 4  # 定日镜高度
+    loc_jire = np.array([0, 0, 80])  # 集热器中心坐标
+    W, H = 6, 6  # 定日镜宽度和高度
+    s_in, alphas, shade, ntrunc, s_reflect, eta_cos, eta_sb, eta_at, eta, E, Ef, year_Ef, year_Ef_per_area, DNI = calculate_results(H, W, location, loc_jire, h)
+
     # 保存结果
     with open('Q1_results.pkl', 'wb') as f:
         pickle.dump({
