@@ -2,57 +2,16 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle
+from m21 import objfun2
 
 # 设置中文字体
 plt.rcParams['font.sans-serif'] = ['黑体', 'Microsoft YaHei', 'DejaVu Sans']  # 指定默认字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决保存图像是负号'-'显示为方块的问题
 
-def objfun2(H, W, h, D, location):
-    """
-    计算目标函数：年平均输出热功率和单位面积年平均输出热功率
-    简化版本，用于快速验证不同参数组合
-    """
-    
-    loc_jire = np.array([0, -D, 80])  # 集热器中心坐标
-    loc_dingri = np.column_stack([location, h * np.ones(location.shape[0])])
-    
-    # 反射光线方向向量
-    s_reflect = loc_jire - loc_dingri
-    s_reflect = s_reflect / np.linalg.norm(s_reflect, axis=1, keepdims=True)
-    
-    # 距离因子
-    distances = np.sqrt((location[:, 0] - 0)**2 + (location[:, 1] + D)**2 + h**2)
-    distance_factor = 1.0 / (1.0 + distances / 1000.0)
-    
-    # 简化的效率计算
-    cos_efficiency = 0.8 * distance_factor
-    eta_at = 0.99321 - 0.0001176 * distances + 1.97e-8 * distances**2
-    eta_sb = 0.85 * np.ones(len(location))
-    eta_trunc = 0.80 * np.ones(len(location))
-    eta_ref = 0.92
-    
-    eta_total = cos_efficiency * eta_at * eta_sb * eta_trunc * eta_ref
-    
-    # DNI计算
-    G0 = 1.366
-    altitude = 3
-    a = 0.4237 - 0.00821 * (6 - altitude)**2
-    b = 0.5055 + 0.00595 * (6.5 - altitude)**2
-    c = 0.2711 + 0.01858 * (2.5 - altitude)**2
-    
-    alpha_avg = np.pi / 4
-    DNI = G0 * (a + b * np.exp(-c / np.sin(alpha_avg)))
-    
-    A = W * H
-    total_power = np.sum(DNI * A * eta_total)
-    total_area = len(location) * A
-    power_per_area = total_power / total_area
-    
-    return total_power, power_per_area
-
 def verify_W_H_relationship():
     """验证定日镜宽度W和高度H的关系"""
-    
+    run_optimization = input("\n是否运行完整计算? (y/n, 默认n): ").lower().strip()
+    simple = True if run_optimization != 'y' else False
     D = 156.0504  # 使用一个固定的D值
     h = 6
     
@@ -95,8 +54,8 @@ def verify_W_H_relationship():
                 y.extend(r * np.sin(theta_range))
             
             location = np.column_stack([x, y])
-            year_EF, _ = objfun2(H, W, h, D, location)
-            
+            year_EF, _ = objfun2(H, W, h, D, location, simple=simple)
+
             results.append([W, H, year_EF / 1000])  # 转换为MW
             print(f"{W:.1f}   {H:.1f}   {year_EF/1000:.3f}")
     
@@ -136,7 +95,8 @@ def verify_W_H_relationship():
 
 def verify_W_dr_relationship():
     """验证定日镜宽度W和相邻定日镜间距dr的关系"""
-    
+    run_optimization = input("\n是否运行完整计算? (y/n, 默认n): ").lower().strip()
+    simple = True if run_optimization != 'y' else False
     D = 156.0504
     h = 6
     
@@ -181,7 +141,7 @@ def verify_W_dr_relationship():
                 y.extend(r * np.sin(theta_range))
             
             location = np.column_stack([x, y])
-            year_EF, _ = objfun2(H, W, h, D, location)
+            year_EF, _ = objfun2(H, W, h, D, location, simple)
             
             results.append([H, W, dr, year_EF / 1000])
             print(f"{W:.1f}   {dr:.1f}   {year_EF/1000:.4f}")

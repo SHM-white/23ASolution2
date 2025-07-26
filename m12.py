@@ -9,7 +9,7 @@ plt.rcParams['axes.unicode_minus'] = False  # 解决保存图像是负号'-'显�
 
 def load_results():
     """加载问题一的计算结果"""
-    with open('Q1_results.pkl', 'rb') as f:
+    with open('Q1_results_optimized.pkl', 'rb') as f:
         data = pickle.load(f)
     return data
 
@@ -58,7 +58,7 @@ def calculate_efficiencies():
     plt.show()
     
     # 2. 阴影遮挡效率
-    eta_sb = 1 - shade * 5 / (xid * yid * 8)
+    eta_sb = 1 - shade
     
     # 计算月平均和年平均阴影遮挡效率
     month_eta_sb = np.zeros(12)

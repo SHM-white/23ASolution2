@@ -363,30 +363,41 @@ def calculate_results(H, W, location, loc_jire, h):
                             yi = yp2[k] + jj * dl * v1[k, 1] - ii * dl * v2[k, 1] - dl * v1[k, 1] / 2 + dl * v2[k, 1] / 2
                             zi = zp2[k] + jj * dl * v1[k, 2] - ii * dl * v2[k, 2] - dl * v1[k, 2] / 2 + dl * v2[k, 2] / 2
                             
-                            # 检查是否被其他定日镜遮挡
+                            # 检查是否被其他定日镜遮挡入射光线和反射光线
                             for kk in nearest_indices: # kk为最近的定日镜索引
-                                # 计算入射光线与其他定日镜的交点（只考虑入射光线的遮挡）
+                                # 计算入射光线和反射光线与其他定日镜的交点（优先入射光线）
                                 try:
                                     # 计算从网格点沿入射光线方向与kk定日镜平面的交点
                                     px1, py1, pz1 = calc_plane_line_intersect_point(
                                         n_dingri[kk], [location[kk, 0], location[kk, 1], h],
                                         -s_in[i, 3*j:3*j+3], [xi, yi, zi]  # 入射光线方向（负号表示从太阳到网格点）
                                     )
-                                    
-                                    if px1 is not None:
-                                        # 检查交点是否在kk定日镜的矩形区域内
-                                        if is_point_in_rectangular(px1, py1, pz1,
+                                    # 检查交点是否在kk定日镜的矩形区域内
+                                    if px1 is not None and is_point_in_rectangular(px1, py1, pz1,
                                                                 np.array([[xp1[kk], yp1[kk], zp1[kk]],
                                                                         [xp2[kk], yp2[kk], zp2[kk]],
                                                                         [xp3[kk], yp3[kk], zp3[kk]],
                                                                         [xp4[kk], yp4[kk], zp4[kk]]])
-                                        ):
-                                            # 验证遮挡定日镜确实在光线路径上（z坐标检查）
-                                            if pz1 > zi:  # 遮挡定日镜在当前网格点上方
-                                                shade1[ii, jj] = 1
-                                                break  # 一旦发现遮挡就跳出
+                                        ) and pz1 > zi:  # 遮挡定日镜在当前网格点上方
+                                        shade1[ii, jj] = 1
+                                        break  # 一旦发现遮挡就跳出
+                                    # 计算从网格点沿反射光线方向与kk定日镜平面的交点
+                                    px2, py2, pz2 = calc_plane_line_intersect_point(
+                                        n_dingri[kk], [location[kk, 0], location[kk, 1], h],
+                                        s_reflect[kk], [xi, yi, zi]  # 反射光线方向
+                                    )
+                                    # 检查交点是否在kk定日镜的矩形区域内
+                                    if px2 is not None and is_point_in_rectangular(px2, py2, pz2,
+                                                                np.array([[xp1[kk], yp1[kk], zp1[kk]],
+                                                                        [xp2[kk], yp2[kk], zp2[kk]],
+                                                                        [xp3[kk], yp3[kk], zp3[kk]],
+                                                                        [xp4[kk], yp4[kk], zp4[kk]]])
+                                        ) and pz2 > zi:  # 遮挡定日镜在当前网格点上方
+                                        shade1[ii, jj] = 1
+                                        break  # 一旦发现遮挡就跳出
                                 except:
                                     continue
+                                
                     
                     # 累计阴影效果（修正：应该按网格比例计算，而不是简单累加）
                     shade[i, j, k] = np.sum(shade1) / (xid * yid)
